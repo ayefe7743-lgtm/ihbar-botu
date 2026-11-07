@@ -8,8 +8,9 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import random
+import uuid
 
-# --- KÖKTEN SSL ZIRHI (Pydroid 3 / Yerel Test İçin) ---
+# --- KÖKTEN SSL ZIRHI ---
 ssl._create_default_https_context = ssl._create_unverified_context
 os.environ['PYTHONHTTPSVERIFY'] = '0'
 
@@ -25,7 +26,7 @@ aiohttp.ClientSession.__init__ = _patched_init
 # ==========================================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-# --- UYANIK TUTMA (KEEP ALIVE) ---
+# --- UYANIK TUTMA ---
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -270,11 +271,8 @@ def luhn_checksum(card_number):
 
 def generate_fake_cc():
     bins = [
-        "402400", # Visa
-        "453200", # Visa
-        "542500", # Mastercard
-        "531200", # Mastercard
-        "555500"  # Mastercard
+        "402400", "453200", "491600", "455600", "414700", # Visa
+        "542500", "531200", "555500", "510510", "520000"  # Mastercard
     ]
     prefix = random.choice(bins)
     body = prefix + "".join([str(random.randint(0, 9)) for _ in range(9)])
@@ -286,7 +284,7 @@ def generate_fake_cc():
             break
             
     ay = str(random.randint(1, 12)).zfill(2)
-    yil = str(random.randint(26, 30))
+    yil = str(random.randint(27, 31))
     cvv = "".join([str(random.randint(0, 9)) for _ in range(3)])
     
     return f"{kart_numarasi}|{ay}|{yil}|{cvv}"
@@ -297,13 +295,10 @@ class CcPanel(discord.ui.View):
 
     @discord.ui.button(label="Kart Üret", style=discord.ButtonStyle.primary, custom_id="cc_uret_btn")
     async def cc_uret_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 10 adet kart üret
         kartlar = [generate_fake_cc() for _ in range(10)]
         formatli_metin = "\n".join(kartlar)
         
         mesaj = f"```\n{formatli_metin}\n```"
-        
-        # Sadece butona basan kişiye özel gönder
         await interaction.response.send_message(mesaj, ephemeral=True)
 
 @bot.tree.command(name="ccuret", description="CC Üretme panelini kanala gönderir.")
@@ -318,6 +313,70 @@ async def ccret(interaction: discord.Interaction):
 
 
 # ==========================================
+# 4. BÖLÜM: TIKTOK SORGU SİSTEMİ
+# ==========================================
+class TiktokModal(discord.ui.Modal, title="🎵 TikTok Sorgu"):
+    kullanici_adi = discord.ui.TextInput(
+        label="TikTok Kullanıcı Adı", 
+        placeholder="Örn: @username (başındaki @ işaretini silin)", 
+        required=True
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        username = self.kullanici_adi.value.replace("@", "").strip()
+        
+        url = f"https://www.tikwm.com/api/user/info?unique_id={username}"
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    await interaction.followup.send("❌ TikTok API'sine ulaşılamadı, lütfen tekrar deneyin.", ephemeral=True)
+                    return
+                
+                data = await resp.json()
+                
+                if data.get("code") != 0 or not data.get("data", {}).get("user"):
+                    await interaction.followup.send(f"❌ `@{username}` adında bir kullanıcı bulunamadı.", ephemeral=True)
+                    return
+                
+                user = data["data"]["user"]
+                fake_token = uuid.uuid4().hex 
+                
+                dm_mesaji = (
+                    f"🎵 **TikTok Sorgu Sonucu** 🎵\n\n"
+                    f"👤 **Kullanıcı Adı:** `@{user.get('uniqueId', username)}`\n"
+                    f"🆔 **Kullanıcı ID:** `{user.get('id', 'Yok')}`\n"
+                    f"🔑 **SecUID:** `{user.get('secUid', 'Yok')}`\n"
+                    f"🎫 **Token (SessionID):** `{fake_token}`"
+                )
+                
+                try:
+                    await interaction.user.send(dm_mesaji)
+                    await interaction.followup.send("✅ Sorgu başarılı! Sonuçlar DM kutunuza gönderildi.", ephemeral=True)
+                except discord.Forbidden:
+                    await interaction.followup.send("❌ Sonuçları size DM'den gönderemedim çünkü DM kutunuz kapalı.", ephemeral=True)
+
+class TiktokPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🎵Tiktok", style=discord.ButtonStyle.secondary, custom_id="tiktok_sorgu_btn")
+    async def tiktok_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TiktokModal())
+
+@bot.tree.command(name="tiktoksorgu", description="TikTok sorgu panelini kanala gönderir")
+@app_commands.default_permissions(manage_messages=True)
+async def tiktoksorgu(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🎵Tiktok Sorgu",
+        description="Birini sorgulamak için lütfen aşağıdaki “tiktok” butonununa basınız.",
+        color=discord.Color.dark_purple()
+    )
+    await interaction.response.send_message(embed=embed, view=TiktokPanel())
+
+
+# ==========================================
 # BOTU BAŞLATMA
 # ==========================================
 @bot.event
@@ -328,7 +387,7 @@ async def on_ready():
     except Exception as e:
         print(f"[clerk] Komut yükleme hatası: {e}")
     
-    print(f"[clerk] {bot.user} çevrimiçi! İhbar, OSINT ve CC sistemleri hazır.")
+    print(f"[clerk] {bot.user} çevrimiçi! İhbar, OSINT, CC ve TikTok sistemleri hazır.")
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
