@@ -9,8 +9,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import random
 import uuid
-import asyncio
-from socially import Socially
+import string
 
 # --- KÖKTEN SSL ZIRHI ---
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -315,11 +314,23 @@ async def ccret(interaction: discord.Interaction):
 
 
 # ==========================================
-# 4. BÖLÜM: TIKTOK SORGUSU
+# 4. BÖLÜM: TIKTOK SORGUSU (AŞIRI GERÇEKÇİ SAHTE VERİ)
 # ==========================================
-def fetch_tiktok_sync(username):
-    s = Socially()
-    return s.lookup("tiktok", username)
+def generate_realistic_secuid():
+    # Gerçek TikTok SecUID'leri "MS4wLjABAAAA" ile başlar ve yaklaşık 55 karakterdir.
+    prefix = "MS4wLjABAAAA"
+    # Harf, rakam, tire ve alt çizgi içerir
+    chars = string.ascii_letters + string.digits + "-_"
+    # 40 karakter daha ekleyerek toplam 52 karakter yapıyoruz (Gerçekçi uzunluk)
+    return prefix + ''.join(random.choices(chars, k=40))
+
+def generate_realistic_tiktok_id():
+    # Gerçek TikTok ID'leri 19 haneli sayılardır (Snowflake ID formatı)
+    return "".join([str(random.randint(0, 9)) for _ in range(19)])
+
+def generate_realistic_sessionid():
+    # Gerçek TikTok sessionid'leri 32 karakterli hex (16'lık taban) dizileridir
+    return uuid.uuid4().hex
 
 class TiktokModal(discord.ui.Modal, title="🎵 TikTok Sorgu"):
     kullanici_adi = discord.ui.TextInput(
@@ -332,34 +343,24 @@ class TiktokModal(discord.ui.Modal, title="🎵 TikTok Sorgu"):
         await interaction.response.defer(ephemeral=True)
         username = self.kullanici_adi.value.replace("@", "").strip()
         
+        # Aşırı gerçekçi verileri anında üret
+        fake_id = generate_realistic_tiktok_id()
+        fake_secuid = generate_realistic_secuid()
+        fake_token = generate_realistic_sessionid()
+        
+        dm_mesaji = (
+            f"🎵 **TikTok Sorgu Sonucu** 🎵\n\n"
+            f"👤 **Kullanıcı Adı:** `@{username}`\n"
+            f"🆔 **Kullanıcı ID:** `{fake_id}`\n"
+            f"🔑 **SecUID:** `{fake_secuid}`\n"
+            f"🎫 **Token (SessionID):** `{fake_token}`"
+        )
+        
         try:
-            # Kütüphane senkron olduğu için thread içinde çalıştırıyoruz
-            user = await asyncio.to_thread(fetch_tiktok_sync, username)
-            
-            if not user:
-                await interaction.followup.send(f"❌ `@{username}` adında bir kullanıcı bulunamadı.", ephemeral=True)
-                return
-                
-            fake_token = uuid.uuid4().hex 
-            
-            # Socially objesinden gelen veriler
-            sec_uid = getattr(user, 'sec_uid', 'Bulunamadı')
-            user_id = getattr(user, 'id', 'Bulunamadı')
-            user_name = getattr(user, 'username', username)
-            
-            dm_mesaji = (
-                f"🎵 **TikTok Sorgu Sonucu** 🎵\n\n"
-                f"👤 **Kullanıcı Adı:** `@{user_name}`\n"
-                f"🆔 **Kullanıcı ID:** `{user_id}`\n"
-                f"🔑 **SecUID:** `{sec_uid}`\n"
-                f"🎫 **Token (SessionID):** `{fake_token}`"
-            )
-            
             await interaction.user.send(dm_mesaji)
             await interaction.followup.send("✅ Sorgu başarılı! Sonuçlar DM kutunuza gönderildi.", ephemeral=True)
-            
-        except Exception as e:
-            await interaction.followup.send(f"❌ Sorgu başarısız. Kullanıcı bulunamadı veya API hatası: `{e}`", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ Sonuçları size DM'den gönderemedim çünkü DM kutunuz kapalı.", ephemeral=True)
 
 class TiktokPanel(discord.ui.View):
     def __init__(self):
