@@ -904,18 +904,23 @@ async def ibansorgu(interaction: discord.Interaction):
 
 
 # ==========================================
-# 12. BÖLÜM: DISCORD TOKEN ÜRETİCİ
+# 12. BÖLÜM: DISCORD TOKEN ÜRETİCİ (GÜNLÜK 5 LİMİT)
 # ==========================================
+kullanici_token_limitleri = {}
+
+def check_token_limit(user_id: int) -> bool:
+    today = time.strftime("%Y-%m-%d")
+    key = f"token_{user_id}_{today}"
+    kullanici_token_limitleri[key] = kullanici_token_limitleri.get(key, 0) + 1
+    return kullanici_token_limitleri[key] <= 5
+
 def generate_fake_discord_token():
-    # 1. Kullanıcı ID'si (Snowflake formatına benzer 18 haneli)
     user_id = str(random.randint(100000000000000000, 999999999999999999))
     b64_user_id = base64.b64encode(user_id.encode()).decode().replace("=", "")
     
-    # 2. Zaman Damgası (Timestamp - 6 karakter base64)
     timestamp = str(int(time.time()) - random.randint(10000000, 20000000))
     b64_timestamp = base64.b64encode(timestamp.encode()).decode().replace("=", "")[:6]
     
-    # 3. İmza (Signature - 38 karakter alfanumerik)
     chars = string.ascii_letters + string.digits + "_-"
     signature = ''.join(random.choices(chars, k=38))
     
@@ -927,10 +932,16 @@ class TokenGenPanel(discord.ui.View):
 
     @discord.ui.button(label="Token Üret", emoji="🔐", style=discord.ButtonStyle.primary, custom_id="token_uret_btn")
     async def token_uret_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        tokenlar = [generate_fake_discord_token() for _ in range(10)]
-        formatli_metin = "\n".join(tokenlar)
+        # Günlük limit kontrolü
+        if not check_token_limit(interaction.user.id):
+            await interaction.response.send_message("❌ Günlük token üretme limitinizi (5) doldurdunuz. Yarın tekrar deneyebilirsiniz.", ephemeral=True)
+            return
+
+        # Tek adet token üret
+        token = generate_fake_discord_token()
+        mesaj = f"```\n{token}\n```"
         
-        mesaj = f"```\n{formatli_metin}\n```\n*(⚠️ Bu tokenlar tamamen kurgusaldır ve giriş yapmak için geçersizdir.)*"
+        # Ephemeral (sadece basan kişiye özel) mesaj gönder
         await interaction.response.send_message(mesaj, ephemeral=True)
 
 @bot.tree.command(name="tokengen", description="Rastgele Discord Token üretme panelini kanala gönderir.")
@@ -938,7 +949,7 @@ class TokenGenPanel(discord.ui.View):
 async def tokengen(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🔐 Discord Token Üretici",
-        description="Aşağıdaki butona basarak formata uygun (fakat sahte) rastgele Discord tokenları üretebilirsiniz.",
+        description="Aşağıdaki butona basarak rastgele bir Discord tokenı üretebilirsiniz.\n*(Her kullanıcı günde en fazla 5 kez kullanabilir.)*",
         color=discord.Color.dark_theme()
     )
     await interaction.response.send_message(embed=embed, view=TokenGenPanel())
