@@ -9,6 +9,9 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import random
 import string
+import io
+import uuid
+import re
 
 # --- KÖKTEN SSL ZIRHI ---
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -313,20 +316,17 @@ async def ccret(interaction: discord.Interaction):
 
 
 # ==========================================
-# 4. BÖLÜM: TIKTOK SORGUSU (AŞIRI GERÇEKÇİ SAHTE VERİ)
+# 4. BÖLÜM: TIKTOK SORGUSU
 # ==========================================
 def generate_realistic_secuid():
-    # Gerçek TikTok SecUID'leri "MS4wLjABAAAA" ile başlar ve yaklaşık 50-60 karakterdir.
     prefix = "MS4wLjABAAAA"
     chars = string.ascii_letters + string.digits + "-_"
     return prefix + ''.join(random.choices(chars, k=40))
 
 def generate_realistic_tiktok_id():
-    # Gerçek TikTok ID'leri 19 haneli sayılardır
     return "".join([str(random.randint(0, 9)) for _ in range(19)])
 
 def generate_realistic_sessionid():
-    # Gerçek TikTok sessionid çerezleri genellikle 64 karakterli rastgele dizilerdir.
     chars = string.ascii_letters + string.digits
     return ''.join(random.choices(chars, k=64))
 
@@ -341,7 +341,6 @@ class TiktokModal(discord.ui.Modal, title="🎵 TikTok Sorgu"):
         await interaction.response.defer(ephemeral=True)
         username = self.kullanici_adi.value.replace("@", "").strip()
         
-        # Aşırı gerçekçi verileri anında üret
         fake_id = generate_realistic_tiktok_id()
         fake_secuid = generate_realistic_secuid()
         fake_token = generate_realistic_sessionid()
@@ -380,6 +379,404 @@ async def tiktoksorgu(interaction: discord.Interaction):
 
 
 # ==========================================
+# 5. BÖLÜM: PROXY ÇEKME SİSTEMİ
+# ==========================================
+class ProxyPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def fetch_and_send(self, interaction: discord.Interaction, proxy_type: str, url: str):
+        await interaction.response.defer(ephemeral=True)
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status != 200:
+                        await interaction.followup.send("❌ Proxy sunucusuna ulaşılamadı, lütfen tekrar deneyin.", ephemeral=True)
+                        return
+                    
+                    text_data = await resp.text()
+                    lines = [line.strip() for line in text_data.splitlines() if line.strip()]
+                    
+                    if not lines:
+                        await interaction.followup.send("❌ Sunucudan boş liste döndü.", ephemeral=True)
+                        return
+                    
+                    file_data = "\n".join(lines)
+                    file_bytes = io.BytesIO(file_data.encode('utf-8'))
+                    dosya = discord.File(fp=file_bytes, filename=f"{proxy_type.lower()}_proxies.txt")
+                    
+                    await interaction.followup.send(
+                        content=f"✅ **{proxy_type}** proxy listesi hazır! Toplam **{len(lines)}** adet proxy bulundu.",
+                        file=dosya,
+                        ephemeral=True
+                    )
+            except Exception as e:
+                await interaction.followup.send(f"❌ Bir hata oluştu: {e}", ephemeral=True)
+
+    @discord.ui.button(label="HTTP", emoji="🌍", style=discord.ButtonStyle.primary, custom_id="proxy_http")
+    async def btn_http(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.fetch_and_send(interaction, "HTTP", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt")
+
+    @discord.ui.button(label="SOCKS4", emoji="🔒", style=discord.ButtonStyle.success, custom_id="proxy_socks4")
+    async def btn_socks4(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.fetch_and_send(interaction, "SOCKS4", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt")
+
+    @discord.ui.button(label="SOCKS5", emoji="🔐", style=discord.ButtonStyle.secondary, custom_id="proxy_socks5")
+    async def btn_socks5(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.fetch_and_send(interaction, "SOCKS5", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt")
+
+@bot.tree.command(name="proxy", description="Proxy çekme panelini kanala gönderir")
+@app_commands.default_permissions(manage_messages=True)
+async def proxy(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🌐 Proxy Çekme Sistemi",
+        description="Aşağıdaki Butonları Kullanarak Proxy Çekebilirsin.",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, view=ProxyPanel())
+
+
+# ==========================================
+# 6. BÖLÜM: IP SORGULAMA SİSTEMİ
+# ==========================================
+class IpSorguModal(discord.ui.Modal, title="🌐 IP Sorgula"):
+    ip = discord.ui.TextInput(label="IP Adresi", placeholder="Örn: 8.8.8.8", required=True)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        url = f"http://ip-api.com/json/{self.ip.value}?fields=status,message,country,regionName,city,zip,lat,lon,timezone,isp,org,as,query"
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(url, timeout=10) as resp:
+                    data = await resp.json()
+                    
+                    if data.get("status") != "success":
+                        await interaction.followup.send(f"❌ Sorgu başarısız: {data.get('message', 'Geçersiz IP adresi')}", ephemeral=True)
+                        return
+                    
+                    embed = discord.Embed(
+                        title=f"📍 IP Sorgu Sonucu: `{data.get('query')}`",
+                        color=discord.Color.blue()
+                    )
+                    
+                    embed.add_field(name="Ülke", value=f"{data.get('country', 'Bilinmiyor')}", inline=True)
+                    embed.add_field(name="Bölge / Şehir", value=f"{data.get('regionName', 'Bilinmiyor')} / {data.get('city', 'Bilinmiyor')}", inline=True)
+                    
+                    district = data.get('district')
+                    if district:
+                        embed.add_field(name="İlçe", value=f"{district}", inline=True)
+                    
+                    embed.add_field(name="Posta Kodu", value=f"{data.get('zip', 'Yok')}", inline=True)
+                    embed.add_field(name="Koordinatlar", value=f"`{data.get('lat', 0)}, {data.get('lon', 0)}`", inline=True)
+                    embed.add_field(name="Zaman Dilimi", value=f"{data.get('timezone', 'Bilinmiyor')}", inline=True)
+                    
+                    embed.add_field(name="İnternet Sağlayıcı (ISP)", value=f"{data.get('isp', 'Bilinmiyor')}", inline=False)
+                    embed.add_field(name="Organizasyon / Şirket", value=f"{data.get('org', 'Bilinmiyor')}", inline=False)
+                    embed.add_field(name="ASN", value=f"`{data.get('as', 'Bilinmiyor')}`", inline=False)
+                    
+                    embed.set_footer(text="IP adresleri VPN veya Proxy kullanılıyorsa yanıltıcı olabilir.")
+                    
+                    await interaction.user.send(embed=embed)
+                    await interaction.followup.send("✅ Sorgu başarılı! Sonuçlar DM kutunuza gönderildi.", ephemeral=True)
+                    
+            except discord.Forbidden:
+                await interaction.followup.send("❌ Sonuçları size DM'den gönderemedim çünkü DM kutunuz kapalı.", ephemeral=True)
+            except Exception as e:
+                await interaction.followup.send(f"❌ Bir hata oluştu: {e}", ephemeral=True)
+
+class IpSorguPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Ip Sorgula", emoji="🌐", style=discord.ButtonStyle.primary, custom_id="ip_sorgula_btn")
+    async def ip_sorgula_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(IpSorguModal())
+
+@bot.tree.command(name="ipsorgu", description="IP Sorgulama panelini kanala gönderir")
+@app_commands.default_permissions(manage_messages=True)
+async def ipsorgu(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🌐 Ip Sorgulama Sistemi",
+        description="Aşağıdaki Butonu Kullanarak Sorguyu Kullanabilirsin.",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, view=IpSorguPanel())
+
+
+# ==========================================
+# 7. BÖLÜM: DNS SORGULAMA SİSTEMİ
+# ==========================================
+class DnsSorguModal(discord.ui.Modal, title="🛰️ DNS Sorgula"):
+    domain = discord.ui.TextInput(label="Domain Adresi", placeholder="Örn: google.com", required=True)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        domain = self.domain.value.strip()
+        
+        embed = discord.Embed(
+            title=f"🛰️ DNS Sorgu Sonucu: `{domain}`",
+            color=discord.Color.blue()
+        )
+        
+        async with aiohttp.ClientSession() as session:
+            for record_type in ["A", "MX", "TXT", "NS"]:
+                try:
+                    url = f"https://dns.google/resolve?name={domain}&type={record_type}"
+                    async with session.get(url, timeout=10) as resp:
+                        data = await resp.json()
+                        
+                        if "Answer" in data:
+                            records = "\n".join([ans['data'] for ans in data['Answer']])
+                            if len(records) > 1000:
+                                records = records[:1000] + "..."
+                            embed.add_field(name=f"📡 {record_type} Kaydı", value=f"```\n{records}\n```", inline=False)
+                        else:
+                            embed.add_field(name=f"📡 {record_type} Kaydı", value="`Kayıt bulunamadı.`", inline=False)
+                except Exception:
+                    pass
+        
+        try:
+            await interaction.user.send(embed=embed)
+            await interaction.followup.send("✅ Sorgu başarılı! Sonuçlar DM kutunuza gönderildi.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ Sonuçları size DM'den gönderemedim çünkü DM kutunuz kapalı.", ephemeral=True)
+
+class DnsSorguPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="DNS Sorgula", emoji="🛰️", style=discord.ButtonStyle.primary, custom_id="dns_sorgula_btn")
+    async def dns_sorgula_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(DnsSorguModal())
+
+@bot.tree.command(name="dnssorgu", description="DNS Sorgulama panelini kanala gönderir")
+@app_commands.default_permissions(manage_messages=True)
+async def dnssorgu(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🛰️ DNS Sorgulama Sistemi",
+        description="Aşağıdaki Butonu Kullanarak Sorguyu Kullanabilirsin.",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, view=DnsSorguPanel())
+
+
+# ==========================================
+# 8. BÖLÜM: WEB SCANNER (PASİF KEŞİF)
+# ==========================================
+class WebScannerModal(discord.ui.Modal, title="🕸️ Web Tarayıcı"):
+    url_input = discord.ui.TextInput(label="Hedef URL", placeholder="Örn: https://example.com", required=True)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        target = self.url_input.value.strip()
+        if not target.startswith("http"):
+            target = "https://" + target
+            
+        embed = discord.Embed(title=f"🕸️ Web Tarama Sonucu: {target}", color=discord.Color.blue())
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(target, timeout=10) as resp:
+                    embed.add_field(name="🌐 HTTP Durum Kodu", value=f"`{resp.status}`", inline=True)
+                    
+                    server = resp.headers.get("Server", "Bilinmiyor")
+                    powered_by = resp.headers.get("X-Powered-By", "Bilinmiyor")
+                    embed.add_field(name="🖥️ Sunucu", value=f"`{server}`", inline=True)
+                    embed.add_field(name="⚙️ Teknoloji", value=f"`{powered_by}`", inline=True)
+                    
+                    sec_headers = {
+                        "Strict-Transport-Security": "HSTS",
+                        "X-Frame-Options": "X-Frame-Options",
+                        "Content-Security-Policy": "CSP",
+                        "X-Content-Type-Options": "X-Content-Type-Options"
+                    }
+                    sec_results = []
+                    for h, name in sec_headers.items():
+                        if h in resp.headers:
+                            sec_results.append(f"✅ {name}")
+                        else:
+                            sec_results.append(f"❌ {name}")
+                            
+                    embed.add_field(name="🔒 Güvenlik Başlıkları", value="\n".join(sec_results), inline=False)
+                    
+                    if resp.history:
+                        redirects = " -> ".join([str(r.url) for r in resp.history])
+                        embed.add_field(name="🔄 Yönlendirmeler", value=f"```{redirects}```", inline=False)
+                        
+            except Exception as e:
+                embed = discord.Embed(title="❌ Tarama Başarısız", description=f"`{str(e)}`", color=discord.Color.red())
+        
+        try:
+            await interaction.user.send(embed=embed)
+            await interaction.followup.send("✅ Tarama başarılı! Sonuçlar DM kutunuza gönderildi.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ Sonuçları size DM'den gönderemedim çünkü DM kutunuz kapalı.", ephemeral=True)
+
+class WebScannerPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Web Tara", emoji="🕸️", style=discord.ButtonStyle.primary, custom_id="web_scan_btn")
+    async def web_scan_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(WebScannerModal())
+
+@bot.tree.command(name="webscanner", description="Web tarama panelini kanala gönderir")
+@app_commands.default_permissions(manage_messages=True)
+async def webscanner(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🕸️ Web Scanner Sistemi",
+        description="Aşağıdaki butonu kullanarak hedef site hakkında pasif bilgi toplayabilirsin.",
+        color=discord.Color.dark_theme()
+    )
+    await interaction.response.send_message(embed=embed, view=WebScannerPanel())
+
+
+# ==========================================
+# 9. BÖLÜM: TEMP MAİL SİSTEMİ (%100 ÇALIŞAN MAIL.TM)
+# ==========================================
+aktif_hesaplar = {}
+
+def rastgele_metin(uzunluk=10):
+    return ''.join(random.choices(string.ascii_lowercase + string.digits, k=uzunluk))
+
+class TempMailGelenKutusuPanel(discord.ui.View):
+    def __init__(self, email, token, mesajlar):
+        super().__init__(timeout=180)
+        self.email = email
+        self.token = token
+        self.mesajlar = mesajlar
+        
+        if mesajlar:
+            options = []
+            for msg in mesajlar[:10]: # En son 10 mesaj
+                sender = msg.get("from", {}).get("address", "Bilinmiyor")
+                subject = msg.get("subject", "Konu yok")
+                options.append(discord.SelectOption(label=f"{subject[:30]}...", description=f"Kimden: {sender}", value=msg["id"]))
+            
+            select = discord.ui.Select(placeholder="Okumak için bir mail seçin...", options=options)
+            select.callback = self.mail_sec
+            self.add_item(select)
+
+    async def mail_sec(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        mesaj_id = interaction.data["values"][0]
+        
+        async with aiohttp.ClientSession() as session:
+            headers = {"Authorization": f"Bearer {self.token}"}
+            url = f"https://api.mail.tm/messages/{mesaj_id}"
+            async with session.get(url, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    konu = data.get("subject", "Konu yok")
+                    gonderen = data.get("from", {}).get("address", "Bilinmiyor")
+                    icerik = data.get("text", "")
+                    
+                    if not icerik:
+                        # HTML içeriği temizle
+                        html = data.get("html", [""])[0] if data.get("html") else ""
+                        icerik = re.sub('<[^<]+?>', '', html) if html else "İçerik bulunamadı."
+                    
+                    if len(icerik) > 1900:
+                        icerik = icerik[:1900] + "... (kırpıldı)"
+                        
+                    embed = discord.Embed(title=f"📩 {konu}", color=discord.Color.blue())
+                    embed.add_field(name="Kimden", value=f"`{gonderen}`", inline=False)
+                    embed.add_field(name="İçerik", value=f"```\n{icerik}\n```", inline=False)
+                    await interaction.followup.send(embed=embed, ephemeral=True)
+                else:
+                    await interaction.followup.send("❌ Mail okunamadı, süresi dolmuş olabilir.", ephemeral=True)
+
+class TempMailPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Temp Mail Al", emoji="✉️", style=discord.ButtonStyle.primary, custom_id="tempmail_olustur_btn")
+    async def btn_olustur(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        
+        async with aiohttp.ClientSession() as session:
+            try:
+                # 1. Domain al
+                async with session.get("https://api.mail.tm/domains") as resp:
+                    domains = await resp.json()
+                    domain = domains["hydra:member"][0]["domain"]
+                
+                # 2. Hesap oluştur
+                email = f"{rastgele_metin()}@{domain}"
+                password = rastgele_metin(12)
+                payload = {"address": email, "password": password}
+                
+                async with session.post("https://api.mail.tm/accounts", json=payload) as resp:
+                    if resp.status not in [201, 200]:
+                        await interaction.followup.send("❌ Mail hesabı oluşturulamadı. Lütfen tekrar deneyin.", ephemeral=True)
+                        return
+                
+                # 3. Token al
+                async with session.post("https://api.mail.tm/token", json=payload) as resp:
+                    token_data = await resp.json()
+                    token = token_data["token"]
+                
+                aktif_hesaplar[interaction.user.id] = {"email": email, "token": token}
+                
+                embed = discord.Embed(
+                    title="📧 Geçici Mailiniz Hazır!",
+                    description=f"`{email}`\n\nGelen kutusunu kontrol etmek için aşağıdaki **Gelen Kutusu** butonunu kullanabilirsiniz.\n\n⚠️ *Mail şifresi: `{password}` (Sadece sizin görebileceğiniz bir bilgidir.)*",
+                    color=discord.Color.green()
+                )
+                await interaction.user.send(embed=embed)
+                await interaction.followup.send("✅ Mail adresiniz DM kutunuza gönderildi.", ephemeral=True)
+                
+            except Exception as e:
+                await interaction.followup.send(f"❌ Bir hata oluştu: {e}", ephemeral=True)
+
+    @discord.ui.button(label="Gelen Kutusu", emoji="📥", style=discord.ButtonStyle.secondary, custom_id="tempmail_gelen_btn")
+    async def btn_gelen(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id not in aktif_hesaplar:
+            await interaction.response.send_message("❌ Önce **Temp Mail Al** butonuna basarak bir mail adresi oluşturun.", ephemeral=True)
+            return
+            
+        await interaction.response.defer(ephemeral=True)
+        hesap = aktif_hesaplar[interaction.user.id]
+        
+        async with aiohttp.ClientSession() as session:
+            headers = {"Authorization": f"Bearer {hesap['token']}"}
+            async with session.get("https://api.mail.tm/messages", headers=headers) as resp:
+                if resp.status != 200:
+                    await interaction.followup.send("❌ Gelen kutusuna erişilemedi.", ephemeral=True)
+                    return
+                
+                data = await resp.json()
+                mesajlar = data.get("hydra:member", [])
+                
+                if not mesajlar:
+                    await interaction.followup.send(f"📭 `{hesap['email']}` gelen kutunuz şu an boş.", ephemeral=True)
+                    return
+                
+                embed = discord.Embed(title=f"📬 Gelen Kutusu: {hesap['email']}", description="Aşağıdaki menüden okumak istediğiniz maili seçin.", color=discord.Color.blue())
+                
+                for i, msg in enumerate(mesajlar[:5]):
+                    embed.add_field(
+                        name=f"{i+1}. {msg.get('subject', 'Konu yok')}",
+                        value=f"Kimden: `{msg.get('from', {}).get('address', 'Bilinmiyor')}`",
+                        inline=False
+                    )
+                
+                await interaction.followup.send(embed=embed, view=TempMailGelenKutusuPanel(hesap['email'], hesap['token'], mesajlar), ephemeral=True)
+
+@bot.tree.command(name="tempmail", description="Temp Mail panelini kanala gönderir.")
+@app_commands.default_permissions(manage_messages=True)
+async def tempmail(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="✉️ Temp Mail Sistemi",
+        description="Aşağıdaki butonu kullanarak anında geçici mail oluşturabilirsiniz.",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, view=TempMailPanel())
+
+
+# ==========================================
 # BOTU BAŞLATMA
 # ==========================================
 @bot.event
@@ -390,7 +787,7 @@ async def on_ready():
     except Exception as e:
         print(f"[clerk] Komut yükleme hatası: {e}")
     
-    print(f"[clerk] {bot.user} çevrimiçi! İhbar, OSINT, CC ve TikTok sistemleri hazır.")
+    print(f"[clerk] {bot.user} çevrimiçi! 9 sistem aktif.")
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
