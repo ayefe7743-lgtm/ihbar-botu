@@ -8,7 +8,6 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import random
-import uuid
 import string
 
 # --- KÖKTEN SSL ZIRHI ---
@@ -317,20 +316,19 @@ async def ccret(interaction: discord.Interaction):
 # 4. BÖLÜM: TIKTOK SORGUSU (AŞIRI GERÇEKÇİ SAHTE VERİ)
 # ==========================================
 def generate_realistic_secuid():
-    # Gerçek TikTok SecUID'leri "MS4wLjABAAAA" ile başlar ve yaklaşık 55 karakterdir.
+    # Gerçek TikTok SecUID'leri "MS4wLjABAAAA" ile başlar ve yaklaşık 50-60 karakterdir.
     prefix = "MS4wLjABAAAA"
-    # Harf, rakam, tire ve alt çizgi içerir
     chars = string.ascii_letters + string.digits + "-_"
-    # 40 karakter daha ekleyerek toplam 52 karakter yapıyoruz (Gerçekçi uzunluk)
     return prefix + ''.join(random.choices(chars, k=40))
 
 def generate_realistic_tiktok_id():
-    # Gerçek TikTok ID'leri 19 haneli sayılardır (Snowflake ID formatı)
+    # Gerçek TikTok ID'leri 19 haneli sayılardır
     return "".join([str(random.randint(0, 9)) for _ in range(19)])
 
 def generate_realistic_sessionid():
-    # Gerçek TikTok sessionid'leri 32 karakterli hex (16'lık taban) dizileridir
-    return uuid.uuid4().hex
+    # Gerçek TikTok sessionid çerezleri genellikle 64 karakterli rastgele dizilerdir.
+    chars = string.ascii_letters + string.digits
+    return ''.join(random.choices(chars, k=64))
 
 class TiktokModal(discord.ui.Modal, title="🎵 TikTok Sorgu"):
     kullanici_adi = discord.ui.TextInput(
