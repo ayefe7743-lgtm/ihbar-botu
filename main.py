@@ -1,15 +1,30 @@
 import os
+import ssl
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-import time
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import time
 
-# Token'ı Railway/Render'in çevre değişkenlerinden okuyacak
+# --- KÖKTEN SSL ZIRHI ---
+ssl._create_default_https_context = ssl._create_unverified_context
+os.environ['PYTHONHTTPSVERIFY'] = '0'
+
+_original_init = aiohttp.ClientSession.__init__
+def _patched_init(self, *args, **kwargs):
+    kwargs['connector'] = aiohttp.TCPConnector(ssl=False)
+    _original_init(self, *args, **kwargs)
+aiohttp.ClientSession.__init__ = _patched_init
+# -----------------------------------------------
+
+# ==========================================
+# TOKEN AYARI (RENDER İÇİN)
+# ==========================================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-# --- UYANIK TUTMA (KEEP ALIVE) ---
+# --- UYANIK TUTMA ---
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -17,24 +32,25 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bot aktif.")
 
 def run_keep_alive():
-    # Render'ın atadığı portu kullan, yoksa 8080
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(('0.0.0.0', port), KeepAliveHandler)
     server.serve_forever()
 
 threading.Thread(target=run_keep_alive, daemon=True).start()
-# ---------------------------------
 
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ==========================================
+# 1. BÖLÜM: İHBAR SİSTEMİ
+# ==========================================
 kullanici_limitleri = {}
 
 def check_daily_limit(user_id: int) -> bool:
     today = time.strftime("%Y-%m-%d")
-    key = f"{user_id}_{today}"
+    key = f"ihbar_{user_id}_{today}"
     kullanici_limitleri[key] = kullanici_limitleri.get(key, 0) + 1
     return kullanici_limitleri[key] <= 4
-
-intents = discord.Intents.default()
-bot = commands.Bot(command_prefix="!", intents=intents)
 
 class IhbarModal(discord.ui.Modal, title="🚨 İhbar Formu"):
     il = discord.ui.TextInput(label="İl", required=True, placeholder="Örn: İstanbul")
@@ -66,17 +82,188 @@ async def ihbarr(interaction: discord.Interaction):
     embed.set_footer(text="Aşağıdaki butonu kullanarak ihbar oluşturabilirsiniz.")
     await interaction.response.send_message(embed=embed, view=IhbarPanel())
 
-@bot.tree.command(name="form", description="Buton çalışmazsa, formu doğrudan buradan açın")
-async def form(interaction: discord.Interaction):
-    await interaction.response.send_modal(IhbarModal())
 
+# ==========================================
+# 2. BÖLÜM: OSINT SİSTEMİ
+# ==========================================
+kullanici_sorgu_limitleri = {}
+
+def check_query_limit(user_id: int) -> bool:
+    today = time.strftime("%Y-%m-%d")
+    key = f"osint_{user_id}_{today}"
+    kullanici_sorgu_limitleri[key] = kullanici_sorgu_limitleri.get(key, 0) + 1
+    return kullanici_sorgu_limitleri[key] <= 10
+
+async def check_and_reply_limit(interaction: discord.Interaction) -> bool:
+    if not check_query_limit(interaction.user.id):
+        await interaction.response.send_message("❌ Günlük sorgu limitinizi (10) doldurdunuz. Yarın tekrar deneyebilirsiniz.", ephemeral=True)
+        return False
+    return True
+
+async def fetch_json(url, headers=None):
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+                return {"error": f"HTTP {resp.status}"}
+        except Exception as e:
+            return {"error": str(e)}
+
+async def send_dm_or_fallback(interaction: discord.Interaction, embed: discord.Embed):
+    try:
+        await interaction.user.send(embed=embed)
+        await interaction.followup.send("✅ Sonuçlar DM kutunuza gönderildi.", ephemeral=True)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ Sonuçları size DM'den gönderemedim çünkü DM kutunuz kapalı.", ephemeral=True)
+
+class IPModal(discord.ui.Modal, title="🌐 IP Analizi"):
+    ip = discord.ui.TextInput(label="IP Adresi", placeholder="Örn: 8.8.8.8", required=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        url = f"http://ip-api.com/json/{self.ip.value}?fields=status,country,regionName,city,zip,lat,lon,timezone,isp,org,as,query"
+        data = await fetch_json(url)
+        if data.get("status") != "success":
+            await interaction.followup.send(f"❌ Hata: {data.get('message', 'Geçersiz IP')}", ephemeral=True)
+            return
+        embed = discord.Embed(title=f"🌐 IP: {data.get('query')}", color=discord.Color.blue())
+        embed.add_field(name="Ülke / Şehir", value=f"{data.get('country')} / {data.get('city')}", inline=True)
+        embed.add_field(name="Bölge", value=data.get('regionName'), inline=True)
+        embed.add_field(name="ISP", value=data.get('isp'), inline=False)
+        embed.add_field(name="Org", value=data.get('org'), inline=False)
+        embed.add_field(name="Koordinat", value=f"{data.get('lat')}, {data.get('lon')}", inline=True)
+        await send_dm_or_fallback(interaction, embed)
+
+class DNSModal(discord.ui.Modal, title="🛰️ DNS Lookup"):
+    domain = discord.ui.TextInput(label="Domain", placeholder="Örn: google.com", required=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        url = f"https://dns.google/resolve?name={self.domain.value}&type=A"
+        data = await fetch_json(url)
+        if "Answer" not in data:
+            await interaction.followup.send("❌ DNS kaydı bulunamadı.", ephemeral=True)
+            return
+        ips = "\n".join([ans['data'] for ans in data['Answer']])
+        embed = discord.Embed(title=f"🛰️ DNS: {self.domain.value}", description=f"```\n{ips}\n```", color=discord.Color.blue())
+        await send_dm_or_fallback(interaction, embed)
+
+class WhoisModal(discord.ui.Modal, title="🔍 WHOIS Sorgusu"):
+    domain = discord.ui.TextInput(label="Domain", placeholder="Örn: google.com", required=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        url = f"https://rdap.org/domain/{self.domain.value}"
+        data = await fetch_json(url)
+        if "error" in data:
+            await interaction.followup.send(f"❌ WHOIS alınamadı: {data['error']}", ephemeral=True)
+            return
+        registrar = "Bilinmiyor"
+        for entity in data.get("entities", []):
+            if "vcardArray" in entity:
+                for vcard in entity["vcardArray"][1]:
+                    if vcard[0] == "fn":
+                        registrar = vcard[3]
+        embed = discord.Embed(title=f"🔍 WHOIS: {self.domain.value}", color=discord.Color.blue())
+        embed.add_field(name="Kayıt Şirketi (Registrar)", value=registrar, inline=False)
+        embed.add_field(name="Oluşturulma", value=data.get("events", [{}])[0].get("eventDate", "Yok"), inline=True)
+        await send_dm_or_fallback(interaction, embed)
+
+class UsernameModal(discord.ui.Modal, title="👤 Username Sorgu"):
+    username = discord.ui.TextInput(label="Kullanıcı Adı", placeholder="Örn: john_doe", required=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        user = self.username.value
+        sites = {
+            "GitHub": f"https://github.com/{user}",
+            "Instagram": f"https://www.instagram.com/{user}",
+            "Twitter": f"https://twitter.com/{user}",
+            "Reddit": f"https://www.reddit.com/user/{user}"
+        }
+        results = []
+        async with aiohttp.ClientSession() as session:
+            for name, url in sites.items():
+                try:
+                    async with session.get(url, timeout=5) as resp:
+                        if resp.status == 200:
+                            results.append(f"✅ {name}: {url}")
+                        else:
+                            results.append(f"❌ {name}")
+                except:
+                    results.append(f"❌ {name}")
+        embed = discord.Embed(title=f"👤 Username: {user}", description="\n".join(results), color=discord.Color.blue())
+        await send_dm_or_fallback(interaction, embed)
+
+class EmailModal(discord.ui.Modal, title="📧 Email OSINT"):
+    email = discord.ui.TextInput(label="E-posta Adresi", placeholder="Örn: test@gmail.com", required=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        email = self.email.value
+        if "@" not in email:
+            await interaction.followup.send("❌ Geçersiz e-posta formatı.", ephemeral=True)
+            return
+        domain = email.split("@")[1]
+        url = f"https://dns.google/resolve?name={domain}&type=MX"
+        data = await fetch_json(url)
+        
+        embed = discord.Embed(title=f"📧 Email: {email}", color=discord.Color.blue())
+        embed.add_field(name="Format", value="✅ Geçerli", inline=True)
+        if "Answer" in data:
+            embed.add_field(name="MX Kaydı", value="✅ Bulundu (Geçerli Sunucu)", inline=True)
+        else:
+            embed.add_field(name="MX Kaydı", value="❌ Bulunamadı (Sahte Olabilir)", inline=True)
+        await send_dm_or_fallback(interaction, embed)
+
+class OsintPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Username", emoji="👤", style=discord.ButtonStyle.primary, custom_id="btn_user", row=0)
+    async def btn_user(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_and_reply_limit(interaction): return
+        await interaction.response.send_modal(UsernameModal())
+
+    @discord.ui.button(label="Email OSINT", emoji="✉️", style=discord.ButtonStyle.primary, custom_id="btn_email", row=0)
+    async def btn_email(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_and_reply_limit(interaction): return
+        await interaction.response.send_modal(EmailModal())
+
+    @discord.ui.button(label="WHOIS", emoji="🔎", style=discord.ButtonStyle.primary, custom_id="btn_whois", row=1)
+    async def btn_whois(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_and_reply_limit(interaction): return
+        await interaction.response.send_modal(WhoisModal())
+
+    @discord.ui.button(label="DNS Lookup", emoji="📡", style=discord.ButtonStyle.primary, custom_id="btn_dns", row=1)
+    async def btn_dns(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_and_reply_limit(interaction): return
+        await interaction.response.send_modal(DNSModal())
+
+    @discord.ui.button(label="IP Analizi", emoji="🌐", style=discord.ButtonStyle.primary, custom_id="btn_ip", row=2)
+    async def btn_ip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await check_and_reply_limit(interaction): return
+        await interaction.response.send_modal(IPModal())
+
+@bot.tree.command(name="osint", description="OSINT panelini kanala gönderir")
+@app_commands.default_permissions(manage_messages=True)
+async def osint(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🛠️OSINT SİSTEMİ",
+        description="Her Kullanıcı Günde 10 Kez Sorgu Yapabilir.",
+        color=discord.Color.from_str("#2b2d31")
+    )
+    await interaction.response.send_message(embed=embed, view=OsintPanel())
+
+
+# ==========================================
+# BOTU BAŞLATMA
+# ==========================================
 @bot.event
 async def on_ready():
     try:
         await bot.tree.sync()
+        print("[clerk] Tüm Slash komutları başarıyla yüklendi.")
     except Exception as e:
         print(f"[clerk] Komut yükleme hatası: {e}")
-    print(f"[clerk] {bot.user} çevrimiçi! Sistem hazır.")
+    
+    print(f"[clerk] {bot.user} çevrimiçi! İhbar ve OSINT sistemleri hazır.")
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
