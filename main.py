@@ -7,8 +7,9 @@ from discord.ext import commands
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
+import random
 
-# --- KÖKTEN SSL ZIRHI ---
+# --- KÖKTEN SSL ZIRHI (Pydroid 3 / Yerel Test İçin) ---
 ssl._create_default_https_context = ssl._create_unverified_context
 os.environ['PYTHONHTTPSVERIFY'] = '0'
 
@@ -24,7 +25,7 @@ aiohttp.ClientSession.__init__ = _patched_init
 # ==========================================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-# --- UYANIK TUTMA ---
+# --- UYANIK TUTMA (KEEP ALIVE) ---
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -40,6 +41,7 @@ threading.Thread(target=run_keep_alive, daemon=True).start()
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
+
 
 # ==========================================
 # 1. BÖLÜM: İHBAR SİSTEMİ
@@ -253,6 +255,69 @@ async def osint(interaction: discord.Interaction):
 
 
 # ==========================================
+# 3. BÖLÜM: RASTGELE BANKA KARTI ÜRETİCİ
+# ==========================================
+def luhn_checksum(card_number):
+    def digits_of(n):
+        return [int(d) for d in str(n)]
+    digits = digits_of(card_number)
+    odd_digits = digits[-1::-2]
+    even_digits = digits[-2::-2]
+    checksum = sum(odd_digits)
+    for d in even_digits:
+        checksum += sum(digits_of(d * 2))
+    return checksum % 10
+
+def generate_fake_cc():
+    bins = [
+        "402400", # Visa
+        "453200", # Visa
+        "542500", # Mastercard
+        "531200", # Mastercard
+        "555500"  # Mastercard
+    ]
+    prefix = random.choice(bins)
+    body = prefix + "".join([str(random.randint(0, 9)) for _ in range(9)])
+    
+    for i in range(10):
+        test_card = body + str(i)
+        if luhn_checksum(test_card) == 0:
+            kart_numarasi = test_card
+            break
+            
+    ay = str(random.randint(1, 12)).zfill(2)
+    yil = str(random.randint(26, 30))
+    cvv = "".join([str(random.randint(0, 9)) for _ in range(3)])
+    
+    return f"{kart_numarasi}|{ay}|{yil}|{cvv}"
+
+class CcPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Kart Üret", style=discord.ButtonStyle.primary, custom_id="cc_uret_btn")
+    async def cc_uret_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 10 adet kart üret
+        kartlar = [generate_fake_cc() for _ in range(10)]
+        formatli_metin = "\n".join(kartlar)
+        
+        mesaj = f"```\n{formatli_metin}\n```"
+        
+        # Sadece butona basan kişiye özel gönder
+        await interaction.response.send_message(mesaj, ephemeral=True)
+
+@bot.tree.command(name="ccuret", description="CC Üretme panelini kanala gönderir.")
+@app_commands.default_permissions(manage_messages=True)
+async def ccret(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="💳 CC ÜRETME",
+        description="Aşağıdaki butona basarak rastgele kart üretebilirsiniz.",
+        color=discord.Color.gold()
+    )
+    await interaction.response.send_message(embed=embed, view=CcPanel())
+
+
+# ==========================================
 # BOTU BAŞLATMA
 # ==========================================
 @bot.event
@@ -263,7 +328,7 @@ async def on_ready():
     except Exception as e:
         print(f"[clerk] Komut yükleme hatası: {e}")
     
-    print(f"[clerk] {bot.user} çevrimiçi! İhbar ve OSINT sistemleri hazır.")
+    print(f"[clerk] {bot.user} çevrimiçi! İhbar, OSINT ve CC sistemleri hazır.")
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
