@@ -9,6 +9,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import random
 import uuid
+import asyncio
+from socially import Socially
 
 # --- KÖKTEN SSL ZIRHI ---
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -313,8 +315,12 @@ async def ccret(interaction: discord.Interaction):
 
 
 # ==========================================
-# 4. BÖLÜM: TIKTOK SORGU SİSTEMİ
+# 4. BÖLÜM: TIKTOK SORGUSU
 # ==========================================
+def fetch_tiktok_sync(username):
+    s = Socially()
+    return s.lookup("tiktok", username)
+
 class TiktokModal(discord.ui.Modal, title="🎵 TikTok Sorgu"):
     kullanici_adi = discord.ui.TextInput(
         label="TikTok Kullanıcı Adı", 
@@ -326,36 +332,34 @@ class TiktokModal(discord.ui.Modal, title="🎵 TikTok Sorgu"):
         await interaction.response.defer(ephemeral=True)
         username = self.kullanici_adi.value.replace("@", "").strip()
         
-        url = f"https://www.tikwm.com/api/user/info?unique_id={username}"
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    await interaction.followup.send("❌ TikTok API'sine ulaşılamadı, lütfen tekrar deneyin.", ephemeral=True)
-                    return
+        try:
+            # Kütüphane senkron olduğu için thread içinde çalıştırıyoruz
+            user = await asyncio.to_thread(fetch_tiktok_sync, username)
+            
+            if not user:
+                await interaction.followup.send(f"❌ `@{username}` adında bir kullanıcı bulunamadı.", ephemeral=True)
+                return
                 
-                data = await resp.json()
-                
-                if data.get("code") != 0 or not data.get("data", {}).get("user"):
-                    await interaction.followup.send(f"❌ `@{username}` adında bir kullanıcı bulunamadı.", ephemeral=True)
-                    return
-                
-                user = data["data"]["user"]
-                fake_token = uuid.uuid4().hex 
-                
-                dm_mesaji = (
-                    f"🎵 **TikTok Sorgu Sonucu** 🎵\n\n"
-                    f"👤 **Kullanıcı Adı:** `@{user.get('uniqueId', username)}`\n"
-                    f"🆔 **Kullanıcı ID:** `{user.get('id', 'Yok')}`\n"
-                    f"🔑 **SecUID:** `{user.get('secUid', 'Yok')}`\n"
-                    f"🎫 **Token (SessionID):** `{fake_token}`"
-                )
-                
-                try:
-                    await interaction.user.send(dm_mesaji)
-                    await interaction.followup.send("✅ Sorgu başarılı! Sonuçlar DM kutunuza gönderildi.", ephemeral=True)
-                except discord.Forbidden:
-                    await interaction.followup.send("❌ Sonuçları size DM'den gönderemedim çünkü DM kutunuz kapalı.", ephemeral=True)
+            fake_token = uuid.uuid4().hex 
+            
+            # Socially objesinden gelen veriler
+            sec_uid = getattr(user, 'sec_uid', 'Bulunamadı')
+            user_id = getattr(user, 'id', 'Bulunamadı')
+            user_name = getattr(user, 'username', username)
+            
+            dm_mesaji = (
+                f"🎵 **TikTok Sorgu Sonucu** 🎵\n\n"
+                f"👤 **Kullanıcı Adı:** `@{user_name}`\n"
+                f"🆔 **Kullanıcı ID:** `{user_id}`\n"
+                f"🔑 **SecUID:** `{sec_uid}`\n"
+                f"🎫 **Token (SessionID):** `{fake_token}`"
+            )
+            
+            await interaction.user.send(dm_mesaji)
+            await interaction.followup.send("✅ Sorgu başarılı! Sonuçlar DM kutunuza gönderildi.", ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ Sorgu başarısız. Kullanıcı bulunamadı veya API hatası: `{e}`", ephemeral=True)
 
 class TiktokPanel(discord.ui.View):
     def __init__(self):
