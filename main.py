@@ -12,6 +12,7 @@ import string
 import io
 import uuid
 import re
+import base64
 
 # --- KÖKTEN SSL ZIRHI ---
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -634,7 +635,7 @@ async def webscanner(interaction: discord.Interaction):
 
 
 # ==========================================
-# 9. BÖLÜM: TEMP MAİL SİSTEMİ (%100 ÇALIŞAN MAIL.TM)
+# 9. BÖLÜM: TEMP MAİL SİSTEMİ
 # ==========================================
 aktif_hesaplar = {}
 
@@ -650,7 +651,7 @@ class TempMailGelenKutusuPanel(discord.ui.View):
         
         if mesajlar:
             options = []
-            for msg in mesajlar[:10]: # En son 10 mesaj
+            for msg in mesajlar[:10]:
                 sender = msg.get("from", {}).get("address", "Bilinmiyor")
                 subject = msg.get("subject", "Konu yok")
                 options.append(discord.SelectOption(label=f"{subject[:30]}...", description=f"Kimden: {sender}", value=msg["id"]))
@@ -674,7 +675,6 @@ class TempMailGelenKutusuPanel(discord.ui.View):
                     icerik = data.get("text", "")
                     
                     if not icerik:
-                        # HTML içeriği temizle
                         html = data.get("html", [""])[0] if data.get("html") else ""
                         icerik = re.sub('<[^<]+?>', '', html) if html else "İçerik bulunamadı."
                     
@@ -698,12 +698,10 @@ class TempMailPanel(discord.ui.View):
         
         async with aiohttp.ClientSession() as session:
             try:
-                # 1. Domain al
                 async with session.get("https://api.mail.tm/domains") as resp:
                     domains = await resp.json()
                     domain = domains["hydra:member"][0]["domain"]
                 
-                # 2. Hesap oluştur
                 email = f"{rastgele_metin()}@{domain}"
                 password = rastgele_metin(12)
                 payload = {"address": email, "password": password}
@@ -713,7 +711,6 @@ class TempMailPanel(discord.ui.View):
                         await interaction.followup.send("❌ Mail hesabı oluşturulamadı. Lütfen tekrar deneyin.", ephemeral=True)
                         return
                 
-                # 3. Token al
                 async with session.post("https://api.mail.tm/token", json=payload) as resp:
                     token_data = await resp.json()
                     token = token_data["token"]
@@ -777,6 +774,177 @@ async def tempmail(interaction: discord.Interaction):
 
 
 # ==========================================
+# 10. BÖLÜM: RASTGELE İBAN ÜRETİCİ
+# ==========================================
+def generate_turkish_iban():
+    bank_codes = ["00010", "00012", "00046", "00064", "00067", "00015", "00017"]
+    bank_code = random.choice(bank_codes)
+    account = "0" + "".join([str(random.randint(0, 9)) for _ in range(16)])
+    
+    bban = bank_code + account
+    check_string = bban + "29002700"
+    remainder = int(check_string) % 97
+    check_digits = 98 - remainder
+    
+    iban = f"TR{check_digits:02d}{bank_code}{account}"
+    formatted_iban = f"{iban[:4]} {iban[4:8]} {iban[8:12]} {iban[12:16]} {iban[16:20]} {iban[20:24]} {iban[24:]}"
+    return formatted_iban
+
+class IbanPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="İBAN Üret", emoji="🏦", style=discord.ButtonStyle.primary, custom_id="iban_uret_btn")
+    async def iban_uret_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ibanlar = [generate_turkish_iban() for _ in range(10)]
+        formatli_metin = "\n".join(ibanlar)
+        
+        mesaj = f"```\n{formatli_metin}\n```"
+        await interaction.response.send_message(mesaj, ephemeral=True)
+
+@bot.tree.command(name="iban", description="Rastgele İBAN üretme panelini kanala gönderir.")
+@app_commands.default_permissions(manage_messages=True)
+async def iban(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🏦 İBAN ÜRETME",
+        description="Aşağıdaki butona basarak geçerli formatta rastgele İBAN üretebilirsiniz.",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed, view=IbanPanel())
+
+
+# ==========================================
+# 11. BÖLÜM: İBAN SORGU SİSTEMİ
+# ==========================================
+BANKA_KODLARI = {
+    "00010": "Ziraat Bankası",
+    "00012": "Halkbank",
+    "00015": "Vakıfbank",
+    "00017": "Yapı Kredi",
+    "00046": "Akbank",
+    "00062": "Garanti BBVA",
+    "00064": "Türkiye İş Bankası",
+    "00067": "Yapı Kredi",
+    "00099": "ING Bank",
+    "00103": "Fibabanka",
+    "00111": "QNB Finansbank",
+    "00123": "HSBC",
+    "00134": "DenizBank",
+    "00135": "Anadolubank",
+    "00146": "Odeabank",
+    "00203": "Albaraka Türk"
+}
+
+def validate_iban(iban):
+    iban = iban.replace(" ", "").upper()
+    if len(iban) != 26 or not iban.startswith("TR"):
+        return False, iban
+    
+    rearranged = iban[4:] + iban[:4]
+    numeric_string = ""
+    for char in rearranged:
+        if char.isdigit():
+            numeric_string += char
+        else:
+            numeric_string += str(ord(char) - 55)
+            
+    return int(numeric_string) % 97 == 1, iban
+
+class IbanSorguModal(discord.ui.Modal, title="🏦 İBAN Sorgula"):
+    iban_input = discord.ui.TextInput(label="İBAN Numarası", placeholder="Örn: TR12 3456 7890 1234 5678 9012 34", required=True)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        is_valid, iban = validate_iban(self.iban_input.value)
+        
+        if not iban.startswith("TR") or len(iban) != 26:
+            await interaction.followup.send("❌ Geçersiz formatta İBAN girdiniz (TR ile başlamalı ve 26 haneli olmalı).", ephemeral=True)
+            return
+            
+        bank_code = iban[4:9]
+        bank_name = BANKA_KODLARI.get(bank_code, "Bilinmeyen / Özel Banka")
+        
+        embed = discord.Embed(
+            title="🏦 İBAN Sorgu Sonucu",
+            color=discord.Color.green() if is_valid else discord.Color.red()
+        )
+        
+        embed.add_field(name="Ülke", value="Türkiye (TR)", inline=True)
+        embed.add_field(name="Geçerlilik", value="✅ Geçerli (Mod 97 Doğrulandı)" if is_valid else "❌ Geçersiz (Hatalı İBAN)", inline=True)
+        embed.add_field(name="Banka", value=f"`{bank_name}`", inline=True)
+        embed.add_field(name="Banka Kodu", value=f"`{bank_code}`", inline=True)
+        embed.add_field(name="Hesap Numarası", value=f"`{iban[9:]}`", inline=False)
+        
+        if is_valid:
+            embed.set_footer(text="Bu İBAN matematiksel olarak geçerlidir ancak aktif bir hesaba ait olmayabilir.")
+        
+        try:
+            await interaction.user.send(embed=embed)
+            await interaction.followup.send("✅ Sorgu başarılı! Sonuçlar DM kutunuza gönderildi.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.followup.send("❌ Sonuçları size DM'den gönderemedim çünkü DM kutunuz kapalı.", ephemeral=True)
+
+class IbanSorguPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="İBAN Sorgula", emoji="🏦", style=discord.ButtonStyle.primary, custom_id="iban_sorgula_btn")
+    async def iban_sorgula_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(IbanSorguModal())
+
+@bot.tree.command(name="ibansorgu", description="İBAN Sorgulama panelini kanala gönderir")
+@app_commands.default_permissions(manage_messages=True)
+async def ibansorgu(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🏦 İBAN Sorgulama Sistemi",
+        description="Aşağıdaki butonu kullanarak bir İBAN'ın banka ve geçerlilik bilgilerini sorgulayabilirsiniz.",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, view=IbanSorguPanel())
+
+
+# ==========================================
+# 12. BÖLÜM: DISCORD TOKEN ÜRETİCİ
+# ==========================================
+def generate_fake_discord_token():
+    # 1. Kullanıcı ID'si (Snowflake formatına benzer 18 haneli)
+    user_id = str(random.randint(100000000000000000, 999999999999999999))
+    b64_user_id = base64.b64encode(user_id.encode()).decode().replace("=", "")
+    
+    # 2. Zaman Damgası (Timestamp - 6 karakter base64)
+    timestamp = str(int(time.time()) - random.randint(10000000, 20000000))
+    b64_timestamp = base64.b64encode(timestamp.encode()).decode().replace("=", "")[:6]
+    
+    # 3. İmza (Signature - 38 karakter alfanumerik)
+    chars = string.ascii_letters + string.digits + "_-"
+    signature = ''.join(random.choices(chars, k=38))
+    
+    return f"{b64_user_id}.{b64_timestamp}.{signature}"
+
+class TokenGenPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Token Üret", emoji="🔐", style=discord.ButtonStyle.primary, custom_id="token_uret_btn")
+    async def token_uret_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        tokenlar = [generate_fake_discord_token() for _ in range(10)]
+        formatli_metin = "\n".join(tokenlar)
+        
+        mesaj = f"```\n{formatli_metin}\n```\n*(⚠️ Bu tokenlar tamamen kurgusaldır ve giriş yapmak için geçersizdir.)*"
+        await interaction.response.send_message(mesaj, ephemeral=True)
+
+@bot.tree.command(name="tokengen", description="Rastgele Discord Token üretme panelini kanala gönderir.")
+@app_commands.default_permissions(manage_messages=True)
+async def tokengen(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🔐 Discord Token Üretici",
+        description="Aşağıdaki butona basarak formata uygun (fakat sahte) rastgele Discord tokenları üretebilirsiniz.",
+        color=discord.Color.dark_theme()
+    )
+    await interaction.response.send_message(embed=embed, view=TokenGenPanel())
+
+
+# ==========================================
 # BOTU BAŞLATMA
 # ==========================================
 @bot.event
@@ -787,7 +955,7 @@ async def on_ready():
     except Exception as e:
         print(f"[clerk] Komut yükleme hatası: {e}")
     
-    print(f"[clerk] {bot.user} çevrimiçi! 9 sistem aktif.")
+    print(f"[clerk] {bot.user} çevrimiçi! 12 sistem aktif.")
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
