@@ -5,7 +5,6 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 import time
 import random
 import string
@@ -27,12 +26,11 @@ aiohttp.ClientSession.__init__ = _patched_init
 # -----------------------------------------------
 
 # ==========================================
-# TOKEN AYARI (RENDER İÇİN)
+# TOKEN VE URL AYARI (RENDER İÇİN)
 # ==========================================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-# --- UYANIK TUTMA (KEEP ALIVE) ---
-# (Artık link yönlendirme yok, sadece botun uyumaması için bu sunucu çalışıyor)
+# --- WEB SUNUCUSU (KEEP ALIVE) ---
 async def handle_keep_alive(request):
     return web.Response(text="Bot aktif.")
 
@@ -952,7 +950,7 @@ async def tokengen(interaction: discord.Interaction):
 
 
 # ==========================================
-# 13. BÖLÜM: LİNK KISALTICI (API)
+# 13. BÖLÜM: LİNK KISALTICI (TINYURL API)
 # ==========================================
 class KisaltModal(discord.ui.Modal, title="🔗 Link Kısaltıcı"):
     uzun_link = discord.ui.TextInput(label="Uzun Link", placeholder="https://ornek.com/cok/uzun/bir/link", required=True)
@@ -967,27 +965,25 @@ class KisaltModal(discord.ui.Modal, title="🔗 Link Kısaltıcı"):
             
         kisa_isim = self.ozel_isim.value.strip().replace(" ", "-").lower() if self.ozel_isim.value else ""
         
-        # is.gd API'si için istek hazırla
-        api_url = f"https://is.gd/create.php?format=json&url={target_url}"
+        # TinyURL API isteği
+        api_url = f"https://tinyurl.com/api-create.php?url={target_url}"
         if kisa_isim:
-            api_url += f"&shorturl={kisa_isim}"
+            api_url += f"&alias={kisa_isim}"
             
         async with aiohttp.ClientSession() as session:
             try:
                 async with session.get(api_url, timeout=10) as resp:
-                    data = await resp.json()
+                    text_response = await resp.text()
                     
-                    if resp.status == 200 and "shorturl" in data:
-                        short_url = data["shorturl"]
+                    # TinyURL başarılı olursa doğrudan linki döner
+                    if resp.status == 200 and text_response.startswith("https://tinyurl.com/"):
                         embed = discord.Embed(title="✅ Link Kısaltıldı", color=discord.Color.green())
                         embed.add_field(name="Uzun Link", value=f"`{target_url}`", inline=False)
-                        embed.add_field(name="Yeni Link", value=f"`{short_url}`", inline=False)
+                        embed.add_field(name="Yeni Link", value=f"`{text_response}`", inline=False)
                         await interaction.followup.send(embed=embed, ephemeral=True)
-                    elif "errormessage" in data:
-                        # is.gd'den gelen hata (örneğin isim zaten alınmışsa)
-                        await interaction.followup.send(f"❌ Hata: {data['errormessage']}", ephemeral=True)
                     else:
-                        await interaction.followup.send("❌ Link kısaltılamadı, API yanıt vermedi.", ephemeral=True)
+                        # Eğer isim zaten alınmışsa veya başka bir hata varsa (TinyURL HTML döner)
+                        await interaction.followup.send(f"❌ Link kısaltılamadı. Sebep: Seçtiğiniz `{kisa_isim}` ismi zaten alınmış olabilir. Farklı bir isim deneyin veya isim kısmını boş bırakın.", ephemeral=True)
             except Exception as e:
                 await interaction.followup.send(f"❌ Bir hata oluştu: {e}", ephemeral=True)
 
