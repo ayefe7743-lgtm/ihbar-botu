@@ -13,6 +13,7 @@ import io
 import uuid
 import re
 import base64
+from aiohttp import web
 
 # --- KÖKTEN SSL ZIRHI ---
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -30,19 +31,18 @@ aiohttp.ClientSession.__init__ = _patched_init
 # ==========================================
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 
-# --- UYANIK TUTMA ---
-class KeepAliveHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot aktif.")
+# --- UYANIK TUTMA (KEEP ALIVE) ---
+# (Artık link yönlendirme yok, sadece botun uyumaması için bu sunucu çalışıyor)
+async def handle_keep_alive(request):
+    return web.Response(text="Bot aktif.")
 
-def run_keep_alive():
+def run_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_keep_alive)
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), KeepAliveHandler)
-    server.serve_forever()
+    web.run_app(app, host='0.0.0.0', port=port)
 
-threading.Thread(target=run_keep_alive, daemon=True).start()
+threading.Thread(target=run_web_server, daemon=True).start()
 
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -904,7 +904,7 @@ async def ibansorgu(interaction: discord.Interaction):
 
 
 # ==========================================
-# 12. BÖLÜM: DISCORD TOKEN ÜRETİCİ (GÜNLÜK 5 LİMİT)
+# 12. BÖLÜM: DISCORD TOKEN ÜRETİCİ
 # ==========================================
 kullanici_token_limitleri = {}
 
@@ -932,16 +932,12 @@ class TokenGenPanel(discord.ui.View):
 
     @discord.ui.button(label="Token Üret", emoji="🔐", style=discord.ButtonStyle.primary, custom_id="token_uret_btn")
     async def token_uret_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Günlük limit kontrolü
         if not check_token_limit(interaction.user.id):
             await interaction.response.send_message("❌ Günlük token üretme limitinizi (5) doldurdunuz. Yarın tekrar deneyebilirsiniz.", ephemeral=True)
             return
 
-        # Tek adet token üret
         token = generate_fake_discord_token()
         mesaj = f"```\n{token}\n```"
-        
-        # Ephemeral (sadece basan kişiye özel) mesaj gönder
         await interaction.response.send_message(mesaj, ephemeral=True)
 
 @bot.tree.command(name="tokengen", description="Rastgele Discord Token üretme panelini kanala gönderir.")
@@ -956,6 +952,65 @@ async def tokengen(interaction: discord.Interaction):
 
 
 # ==========================================
+# 13. BÖLÜM: LİNK KISALTICI (API)
+# ==========================================
+class KisaltModal(discord.ui.Modal, title="🔗 Link Kısaltıcı"):
+    uzun_link = discord.ui.TextInput(label="Uzun Link", placeholder="https://ornek.com/cok/uzun/bir/link", required=True)
+    ozel_isim = discord.ui.TextInput(label="Özel İsim (İsteğe Bağlı)", placeholder="Sadece harf ve rakam (örn: bedavanumara)", required=False)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        
+        target_url = self.uzun_link.value.strip()
+        if not target_url.startswith("http"):
+            target_url = "https://" + target_url
+            
+        kisa_isim = self.ozel_isim.value.strip().replace(" ", "-").lower() if self.ozel_isim.value else ""
+        
+        # is.gd API'si için istek hazırla
+        api_url = f"https://is.gd/create.php?format=json&url={target_url}"
+        if kisa_isim:
+            api_url += f"&shorturl={kisa_isim}"
+            
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.get(api_url, timeout=10) as resp:
+                    data = await resp.json()
+                    
+                    if resp.status == 200 and "shorturl" in data:
+                        short_url = data["shorturl"]
+                        embed = discord.Embed(title="✅ Link Kısaltıldı", color=discord.Color.green())
+                        embed.add_field(name="Uzun Link", value=f"`{target_url}`", inline=False)
+                        embed.add_field(name="Yeni Link", value=f"`{short_url}`", inline=False)
+                        await interaction.followup.send(embed=embed, ephemeral=True)
+                    elif "errormessage" in data:
+                        # is.gd'den gelen hata (örneğin isim zaten alınmışsa)
+                        await interaction.followup.send(f"❌ Hata: {data['errormessage']}", ephemeral=True)
+                    else:
+                        await interaction.followup.send("❌ Link kısaltılamadı, API yanıt vermedi.", ephemeral=True)
+            except Exception as e:
+                await interaction.followup.send(f"❌ Bir hata oluştu: {e}", ephemeral=True)
+
+class KisaltPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Link Kısalt", emoji="🔗", style=discord.ButtonStyle.primary, custom_id="kisalt_btn")
+    async def kisalt_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(KisaltModal())
+
+@bot.tree.command(name="kisalt", description="Link kısaltma panelini kanala gönderir")
+@app_commands.default_permissions(manage_messages=True)
+async def kisalt(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🔗 Link Kısaltıcı",
+        description="Aşağıdaki butonu kullanarak uzun linklerinizi kısaltabilirsiniz.",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, view=KisaltPanel())
+
+
+# ==========================================
 # BOTU BAŞLATMA
 # ==========================================
 @bot.event
@@ -966,7 +1021,7 @@ async def on_ready():
     except Exception as e:
         print(f"[clerk] Komut yükleme hatası: {e}")
     
-    print(f"[clerk] {bot.user} çevrimiçi! 12 sistem aktif.")
+    print(f"[clerk] {bot.user} çevrimiçi! 13 sistem aktif.")
 
 if __name__ == "__main__":
     bot.run(DISCORD_TOKEN)
